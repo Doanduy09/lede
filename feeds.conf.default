@@ -5,3 +5,4 @@ src-git telephony https://git.openwrt.org/feed/telephony.git
 src-git kenzo https://github.com/kenzok8/openwrt-packages
 src-git small https://github.com/kenzok8/small
 src-git genzpn https://github.com/GenzPN/GenzPN-packages
+src-git modemband https://github.com/4IceG/luci-app-modemband.git
