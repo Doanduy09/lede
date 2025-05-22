@@ -1,0 +1,341 @@
+#!/bin/sh /etc/rc.common
+
+START=90
+STOP=10
+
+LOG_FILE="/tmp/network_setup.log"
+MAX_LOG_SIZE=2000000
+CHECK_INTERVAL=30
+INITIAL_WAIT=60
+
+start() {
+    if [ -f "$LOG_FILE" ]; then
+        echo > "$LOG_FILE"
+    else
+        touch "$LOG_FILE"
+    fi
+
+    echo "===== $(date): Bắt đầu chạy script check_wwan =====" >> "$LOG_FILE"
+
+    MODEM_LIST=$(mmcli -L 2>/dev/null)
+    if [ -z "$MODEM_LIST" ]; then
+        logger -t check_wwan "Không phát hiện modem WWAN."
+        echo "$(date): [ERROR] Không phát hiện modem WWAN." >> "$LOG_FILE"
+        exit 1
+    fi
+    MODEM_PATH=$(echo "$MODEM_LIST" | grep -o '/org/freedesktop/ModemManager1/Modem/[0-9]' | head -n 1)
+    MODEM_INDEX=$(echo "$MODEM_PATH" | grep -o '[0-9]$')
+    MODEM_INFO=$(mmcli -m "$MODEM_INDEX" 2>/dev/null)
+    MODEM_MODEL=$(echo "$MODEM_INFO" | grep 'model' | awk -F': ' '{print $2}' | tr -d ' ')
+    echo "$(date): [INFO] Phát hiện modem: $MODEM_MODEL (Index: $MODEM_INDEX)." >> "$LOG_FILE"
+
+    if uci get network.usbwan >/dev/null 2>&1; then
+        uci delete network.usbwan
+        echo "$(date): [INFO] Đã xóa giao diện usbwan để tránh xung đột." >> "$LOG_FILE"
+    fi
+    if uci get network.usbwan6 >/dev/null 2>&1; then
+        uci delete network.usbwan6
+        echo "$(date): [INFO] Đã xóa giao diện usbwan6 để tránh xung đột." >> "$LOG_FILE"
+    fi
+
+    SIM_INFO=$(mmcli -i 0 2>/dev/null)
+    if [ -z "$SIM_INFO" ]; then
+        logger -t check_wwan "Không tìm thấy SIM nào."
+        echo "$(date): [WARN] Không tìm thấy SIM nào tại index 0. Sử dụng APN mặc định: m3-world." >> "$LOG_FILE"
+        APN="m3-world"
+    else
+        OPERATOR_ID=$(echo "$SIM_INFO" | grep 'operator id' | awk -F': ' '{print $2}' | tr -d ' ')
+        if [ -z "$OPERATOR_ID" ]; then
+            logger -t check_wwan "Không lấy được operator id từ SIM."
+            echo "$(date): [WARN] Không lấy được operator id từ SIM tại index 0. Sử dụng APN mặc định: m3-world." >> "$LOG_FILE"
+            APN="m3-world"
+        else
+            echo "$(date): [INFO] Đã tìm thấy SIM tại index 0 với operator id: $OPERATOR_ID." >> "$LOG_FILE"
+            case "$OPERATOR_ID" in
+                "45201") APN="v-internet" ;;
+                "45202") APN="m3-world" ;;
+                "45204") APN="m-wap" ;;
+                *) APN="m3-world" ;;
+            esac
+            echo "$(date): [INFO] Sử dụng APN: $APN cho operator id: $OPERATOR_ID." >> "$LOG_FILE"
+        fi
+    fi
+
+    METRIC=1
+    INTERFACES=""
+    WWAN_COUNT=0
+    DMESG_LOG=$(dmesg | grep -E "cdc_mbim|rndis_host|qmi_wwan|Fibocom")
+    echo "$(date): [INFO] Kiểm tra log dmesg: $DMESG_LOG" >> "$LOG_FILE"
+
+    if echo "$DMESG_LOG" | grep -qi "cdc_mbim" && echo "$DMESG_LOG" | grep -q "cdc_mbim.*wwan0: register"; then
+        WWAN_IFACE="wwan0"
+        uci set network.$WWAN_IFACE=interface
+        uci set network.$WWAN_IFACE.proto='mbim'
+        uci set network.$WWAN_IFACE.device="/dev/cdc-wdm0"
+        uci set network.$WWAN_IFACE.apn="$APN"
+        uci set network.$WWAN_IFACE.pdp='ipv4v6'
+        uci set network.$WWAN_IFACE.username='mms'
+        uci set network.$WWAN_IFACE.password='mms'
+        uci set network.$WWAN_IFACE.auth='both'
+        uci set network.$WWAN_IFACE.pdptype='ipv4v6'
+        uci set network.$WWAN_IFACE.peerdns='0'
+        uci add_list network.$WWAN_IFACE.dns='8.8.8.8'
+        uci add_list network.$WWAN_IFACE.dns='8.8.4.4'
+        uci set network.$WWAN_IFACE.metric="$METRIC"
+        METRIC=$((METRIC+1))
+        INTERFACES="$INTERFACES $WWAN_IFACE"
+        WWAN_COUNT=$((WWAN_COUNT+1))
+        echo "$(date): [INFO] Đã cấu hình giao diện $WWAN_IFACE với giao thức MBIM trên thiết bị /dev/cdc-wdm0." >> "$LOG_FILE"
+    else
+        echo "$(date): [WARN] Không cấu hình MBIM vì không có thiết bị đăng ký." >> "$LOG_FILE"
+    fi
+
+    if echo "$DMESG_LOG" | grep -qi "qmi_wwan" && echo "$DMESG_LOG" | grep -q "qmi_wwan.*register"; then
+        WWAN_IFACE="wwan0"
+        uci set network.$WWAN_IFACE=interface
+        uci set network.$WWAN_IFACE.proto='qmi'
+        uci set network.$WWAN_IFACE.device="/dev/cdc-wdm0"
+        uci set network.$WWAN_IFACE.apn="$APN"
+        uci set network.$WWAN_IFACE.pdp='ipv4v6'
+        uci set network.$WWAN_IFACE.username='mms'
+        uci set network.$WWAN_IFACE.password='mms'
+        uci set network.$WWAN_IFACE.auth='both'
+        uci set network.$WWAN_IFACE.pdptype='ipv4v6'
+        uci set network.$WWAN_IFACE.peerdns='0'
+        uci add_list network.$WWAN_IFACE.dns='8.8.8.8'
+        uci add_list network.$WWAN_IFACE.dns='8.8.4.4'
+        uci set network.$WWAN_IFACE.metric="$METRIC"
+        METRIC=$((METRIC+1))
+        INTERFACES="$INTERFACES $WWAN_IFACE"
+        WWAN_COUNT=$((WWAN_COUNT+1))
+        echo "$(date): [INFO] Đã cấu hình giao diện $WWAN_IFACE với giao thức QMI trên thiết bị /dev/cdc-wdm0." >> "$LOG_FILE"
+    else
+        echo "$(date): [WARN] Không cấu hình QMI vì không có thiết bị đăng ký." >> "$LOG_FILE"
+    fi
+
+    if echo "$DMESG_LOG" | grep -qi "rndis_host" && echo "$DMESG_LOG" | grep -q "rndis_host.*usb0: register"; then
+        USB_IFACE="usb0"
+        uci set network.$USB_IFACE=interface
+        uci set network.$USB_IFACE.proto='dhcp'
+        uci set network.$USB_IFACE.device="usb0"
+        uci set network.$USB_IFACE.metric="$METRIC"
+        METRIC=$((METRIC+1))
+        INTERFACES="$INTERFACES $USB_IFACE"
+        echo "$(date): [INFO] Đã cấu hình giao diện $USB_IFACE với giao thức DHCP." >> "$LOG_FILE"
+    else
+        echo "$(date): [WARN] Không cấu hình RNDIS vì không có thiết bị đăng ký." >> "$LOG_FILE"
+    fi
+
+    if echo "$MODEM_MODEL" | grep -qi "L860" && echo "$DMESG_LOG" | grep -qi "Fibocom"; then
+        uci set network.wwan0=interface
+        uci set network.wwan0.proto='xmm'
+        uci set network.wwan0.device='/dev/ttyACM2'
+        uci set network.wwan0.apn="$APN"
+        uci set network.wwan0.auth='auto'
+        uci set network.wwan0.pdp='ipv4v6'
+        uci set network.wwan0.username='mms'
+        uci set network.wwan0.password='mms'
+        uci add_list network.wwan0.dns='8.8.8.8'
+        uci add_list network.wwan0.dns='8.8.4.4'
+        uci set network.wwan0.metric="$METRIC"
+        METRIC=$((METRIC+1))
+        INTERFACES="$INTERFACES wwan0"
+        WWAN_COUNT=$((WWAN_COUNT+1))
+        echo "$(date): [INFO] Đã cấu hình giao diện wwan0 cho Fibocom L860 với giao thức XMM." >> "$LOG_FILE"
+    elif echo "$MODEM_MODEL" | grep -qi "FM350" && echo "$DMESG_LOG" | grep -qi "Fibocom"; then
+        uci set network.wwan0=interface
+        uci add_list network.wwan0.allowedauth='none'
+        uci set network.wwan0.proto='xmm'
+        uci set network.wwan0.force_link='1'
+        uci set network.wwan0.device='/dev/ttyUSB1'
+        uci set network.wwan0.apn="$APN"
+        uci set network.wwan0.auth='auto'
+        uci set network.wwan0.pdp='ip'
+        uci set network.wwan0.username='mms'
+        uci set network.wwan0.password='mms'
+        uci add_list network.wwan0.dns='8.8.8.8'
+        uci add_list network.wwan0.dns='8.8.4.4'
+        uci set network.wwan0.metric="$METRIC"
+        METRIC=$((METRIC+1))
+        INTERFACES="$INTERFACES wwan0"
+        WWAN_COUNT=$((WWAN_COUNT+1))
+        echo "$(date): [INFO] Đã cấu hình giao diện wwan0 cho Fibocom FM350 với giao thức XMM." >> "$LOG_FILE"
+    else
+        echo "$(date): [WARN] Không cấu hình Fibocom vì không có thiết bị đăng ký." >> "$LOG_FILE"
+    fi
+
+    echo "$(date): [INFO] Bỏ qua cdc_ncm vì không cấu hình trong WWAN 4G/5G." >> "$LOG_FILE"
+
+    for iface in $(uci show network | grep -E "proto='mbim'|proto='qmi'" | grep -o "network\.[^=]*" | cut -d'.' -f2); do
+        if ! echo "$iface" | grep -qE "^wwan[0-9]+$"; then
+            uci delete network.$iface 2>/dev/null
+            echo "$(date): [INFO] Đã xóa giao diện $iface vì không cần thiết." >> "$LOG_FILE"
+        fi
+    done
+
+    uci commit network
+    echo "$(date): [INFO] Đã commit cấu hình network." >> "$LOG_FILE"
+
+    ZONE_INDEX=$(uci show firewall | grep ".name='wan'" | cut -d'[' -f2 | cut -d']' -f1)
+    if [ -n "$ZONE_INDEX" ]; then
+        for iface in $INTERFACES; do
+            if uci get network.$iface >/dev/null 2>&1; then
+                if ! uci get firewall.@zone[$ZONE_INDEX].network | grep -q "$iface"; then
+                    uci add_list firewall.@zone[$ZONE_INDEX].network="$iface"
+                    echo "$(date): [INFO] Đã thêm giao diện $iface vào zone wan." >> "$LOG_FILE"
+                else
+                    echo "$(date): [INFO] Giao diện $iface đã tồn tại trong zone wan, bỏ qua." >> "$LOG_FILE"
+                fi
+            fi
+        done
+        uci commit firewall
+        echo "$(date): [INFO] Đã commit cấu hình firewall." >> "$LOG_FILE"
+    else
+        echo "$(date): [WARN] Không tìm thấy zone wan, tạo mới zone wan." >> "$LOG_FILE"
+        uci add firewall zone
+        uci set firewall.@zone[-1].name="wan"
+        uci set firewall.@zone[-1].input="REJECT"
+        uci set firewall.@zone[-1].output="ACCEPT"
+        uci set firewall.@zone[-1].forward="REJECT"
+        for iface in $INTERFACES; do
+            if uci get network.$iface >/dev/null 2>&1; then
+                uci add_list firewall.@zone[-1].network="$iface"
+                echo "$(date): [INFO] Đã thêm giao diện $iface vào zone wan mới tạo." >> "$LOG_FILE"
+            fi
+        done
+        uci commit firewall
+        echo "$(date): [INFO] Đã tạo và commit zone wan mới." >> "$LOG_FILE"
+    fi
+
+    /etc/init.d/network reload
+    /etc/init.d/firewall reload
+    echo "$(date): [INFO] Đã khởi động lại dịch vụ network và firewall." >> "$LOG_FILE"
+
+    echo "$(date): [INFO] Đang chờ card WWAN setup trong $INITIAL_WAIT giây..." >> "$LOG_FILE"
+    sleep "$INITIAL_WAIT"
+
+    WWAN_IFACE=$(ip link | grep -E "^[0-9]+: wwan[0-9]" | awk -F': ' '{print $2}' | head -n 1)
+    if [ -z "$WWAN_IFACE" ]; then
+        WWAN_IFACE="wwan0"
+        echo "$(date): [WARN] Không tìm thấy giao diện wwan, sử dụng wwan0 mặc định để ping." >> "$LOG_FILE"
+    else
+        echo "$(date): [INFO] Phát hiện giao diện wwan thực tế: $WWAN_IFACE." >> "$LOG_FILE"
+    fi
+
+    echo "$(date): [INFO] Thực hiện ping lần đầu qua giao diện $WWAN_IFACE đến 8.8.8.8..." >> "$LOG_FILE"
+    PING_RESULT=$(ping -I "$WWAN_IFACE" -c 4 8.8.8.8 2>&1)
+    PING_LOSS=$(echo "$PING_RESULT" | grep -o "[0-9]\+% packet loss" | awk '{print $1}' | tr -d '%')
+    PING_TIME=$(echo "$PING_RESULT" | grep "rtt min/avg/max/mdev" | awk -F'=' '{print $2}' | awk '{print $2}' | cut -d'/' -f2)
+    if echo "$PING_RESULT" | grep -q "0% packet loss"; then
+        echo "$(date): [SUCCESS] Ping lần đầu thành công qua $WWAN_IFACE. Tỷ lệ mất gói: $PING_LOSS%, Thời gian trung bình: ${PING_TIME:-N/A} ms. Kết nối ổn định." >> "$LOG_FILE"
+        logger -t check_wwan "Ping lần đầu thành công qua $WWAN_IFACE. Tỷ lệ mất gói: $PING_LOSS%, Thời gian trung bình: ${PING_TIME:-N/A} ms."
+    else
+        echo "$(date): [ERROR] Ping lần đầu thất bại qua $WWAN_IFACE. Tỷ lệ mất gói: $PING_LOSS%. Chờ thêm 30 giây để thử lại." >> "$LOG_FILE"
+        logger -t check_wwan "Ping lần đầu thất bại qua $WWAN_IFACE. Tỷ lệ mất gói: $PING_LOSS%."
+        sleep 30
+        echo "$(date): [INFO] Thực hiện ping lần thứ hai qua giao diện $WWAN_IFACE đến 8.8.8.8..." >> "$LOG_FILE"
+        PING_RESULT=$(ping -I "$WWAN_IFACE" -c 4 8.8.8.8 2>&1)
+        PING_LOSS=$(echo "$PING_RESULT" | grep -o "[0-9]\+% packet loss" | awk '{print $1}' | tr -d '%')
+        PING_TIME=$(echo "$PING_RESULT" | grep "rtt min/avg/max/mdev" | awk -F'=' '{print $2}' | awk '{print $2}' | cut -d'/' -f2)
+        if echo "$PING_RESULT" | grep -q "0% packet loss"; then
+            echo "$(date): [SUCCESS] Ping lần thứ hai thành công qua $WWAN_IFACE. Tỷ lệ mất gói: $PING_LOSS%, Thời gian trung bình: ${PING_TIME:-N/A} ms. Kết nối ổn định." >> "$LOG_FILE"
+            logger -t check_wwan "Ping lần thứ hai thành công qua $WWAN_IFACE. Tỷ lệ mất gói: $PING_LOSS%, Thời gian trung bình: ${PING_TIME:-N/A} ms."
+        else
+            echo "$(date): [ERROR] Ping lần thứ hai thất bại qua $WWAN_IFACE. Tỷ lệ mất gói: $PING_LOSS%. Thực hiện renew IP." >> "$LOG_FILE"
+            logger -t check_wwan "Ping lần thứ hai thất bại qua $WWAN_IFACE. Tỷ lệ mất gói: $PING_LOSS%."
+            echo "$(date): [INFO] Đang thực hiện renew IP cho giao diện $WWAN_IFACE..." >> "$LOG_FILE"
+            ifdown "$WWAN_IFACE" 2>/dev/null
+            ifup "$WWAN_IFACE" 2>/dev/null
+            sleep 5
+            echo "$(date): [INFO] Hoàn tất renew IP cho giao diện $WWAN_IFACE. Kiểm tra lại kết nối..." >> "$LOG_FILE"
+            PING_RESULT=$(ping -I "$WWAN_IFACE" -c 4 8.8.8.8 2>&1)
+            PING_LOSS=$(echo "$PING_RESULT" | grep -o "[0-9]\+% packet loss" | awk '{print $1}' | tr -d '%')
+            PING_TIME=$(echo "$PING_RESULT" | grep "rtt min/avg/max/mdev" | awk -F'=' '{print $2}' | awk '{print $2}' | cut -d'/' -f2)
+            if echo "$PING_RESULT" | grep -q "0% packet loss"; then
+                echo "$(date): [SUCCESS] Renew IP thành công cho $WWAN_IFACE. Tỷ lệ mất gói: $PING_LOSS%, Thời gian trung bình: ${PING_TIME:-N/A} ms. Kết nối ổn định." >> "$LOG_FILE"
+                logger -t check_wwan "Renew IP thành công cho $WWAN_IFACE. Tỷ lệ mất gói: $PING_LOSS%, Thời gian trung bình: ${PING_TIME:-N/A} ms."
+            else
+                echo "$(date): [ERROR] Renew IP thất bại cho $WWAN_IFACE. Tỷ lệ mất gói: $PING_LOSS%." >> "$LOG_FILE"
+                logger -t check_wwan "Renew IP thất bại cho $WWAN_IFACE. Tỷ lệ mất gói: $PING_LOSS%."
+            fi
+        fi
+    fi
+
+    if echo "$PING_RESULT" | grep -q "0% packet loss"; then
+        echo "$(date): [INFO] Script check_wwan bắt đầu chạy nền cho giao diện $WWAN_IFACE." >> "$LOG_FILE"
+        logger -t check_wwan "Script bắt đầu chạy nền cho $WWAN_IFACE."
+        check_ping_xmm &
+    fi
+
+    restart_mwan3
+}
+
+stop() {
+    kill $(ps | grep "[c]heck_ping_xmm" | awk '{print $1}') 2>/dev/null
+    echo "$(date): [INFO] Script check_wwan đã dừng." >> "$LOG_FILE"
+    logger -t check_wwan "Script đã dừng."
+    echo "===== $(date): Kết thúc script check_wwan =====" >> "$LOG_FILE"
+}
+
+check_ping_xmm() {
+    LAST_RENEW_TIME=0
+    RENEW_COOLDOWN=60
+
+    while true; do
+        if [ -f "$LOG_FILE" ] && [ $(ls -l "$LOG_FILE" | awk '{print $5}') -ge $MAX_LOG_SIZE ]; then
+            echo "$(date): [INFO] Log đã vượt 2MB, xóa và ghi lại." >> "$LOG_FILE"
+            echo > "$LOG_FILE"
+        fi
+
+        echo "$(date): [INFO] Thực hiện ping định kỳ qua giao diện $WWAN_IFACE đến 8.8.8.8..." >> "$LOG_FILE"
+        PING_RESULT=$(ping -I "$WWAN_IFACE" -c 4 8.8.8.8 2>&1)
+        PING_LOSS=$(echo "$PING_RESULT" | grep -o "[0-9]\+% packet loss" | awk '{print $1}' | tr -d '%' || echo "100")
+        PING_TIME=$(echo "$PING_RESULT" | grep "rtt min/avg/max/mdev" | awk -F'=' '{print $2}' | awk '{print $2}' | cut -d'/' -f2 || echo "N/A")
+
+        if [ "$PING_LOSS" = "0" ]; then
+            echo "$(date): [SUCCESS] Ping thành công qua $WWAN_IFACE. Tỷ lệ mất gói: $PING_LOSS%, Thời gian trung bình: $PING_TIME ms. Kết nối ổn định." >> "$LOG_FILE"
+            logger -t check_wwan "Ping thành công qua $WWAN_IFACE. Tỷ lệ mất gói: $PING_LOSS%, Thời gian trung bình: $PING_TIME ms."
+        else
+            echo "$(date): [ERROR] Ping thất bại qua $WWAN_IFACE. Tỷ lệ mất gói: $PING_LOSS%." >> "$LOG_FILE"
+            logger -t check_wwan "Ping thất bại qua $WWAN_IFACE. Tỷ lệ mất gói: $PING_LOSS%."
+
+            CURRENT_TIME=$(date +%s)
+            if [ $((CURRENT_TIME - LAST_RENEW_TIME)) -ge $RENEW_COOLDOWN ]; then
+                echo "$(date): [INFO] Đang thực hiện renew IP cho giao diện $WWAN_IFACE..." >> "$LOG_FILE"
+                ifdown "$WWAN_IFACE" 2>/dev/null
+                ifup "$WWAN_IFACE" 2>/dev/null
+                LAST_RENEW_TIME=$CURRENT_TIME
+                sleep 5
+                echo "$(date): [INFO] Hoàn tất renew IP cho giao diện $WWAN_IFACE. Kiểm tra lại kết nối..." >> "$LOG_FILE"
+                PING_RESULT=$(ping -I "$WWAN_IFACE" -c 4 8.8.8.8 2>&1)
+                PING_LOSS=$(echo "$PING_RESULT" | grep -o "[0-9]\+% packet loss" | awk '{print $1}' | tr -d '%' || echo "100")
+                PING_TIME=$(echo "$PING_RESULT" | grep "rtt min/avg/max/mdev" | awk -F'=' '{print $2}' | awk '{print $2}' | cut -d'/' -f2 || echo "N/A")
+                if [ "$PING_LOSS" = "0" ]; then
+                    echo "$(date): [SUCCESS] Renew IP thành công cho $WWAN_IFACE. Tỷ lệ mất gói: $PING_LOSS%, Thời gian trung bình: $PING_TIME ms. Kết nối ổn định." >> "$LOG_FILE"
+                    logger -t check_wwan "Renew IP thành công cho $WWAN_IFACE. Tỷ lệ mất gói: $PING_LOSS%, Thời gian trung bình: $PING_TIME ms."
+                else
+                    echo "$(date): [ERROR] Renew IP thất bại cho $WWAN_IFACE. Tỷ lệ mất gói: $PING_LOSS%. Chờ $RENEW_COOLDOWN giây trước khi thử lại." >> "$LOG_FILE"
+                    logger -t check_wwan "Renew IP thất bại cho $WWAN_IFACE. Tỷ lệ mất gói: $PING_LOSS%."
+                fi
+            fi
+        fi
+        sleep "$CHECK_INTERVAL"
+    done
+}
+
+restart_mwan3() {
+    if [ -f "/etc/init.d/mwan3" ]; then
+        echo "$(date): [INFO] Đang khởi động lại dịch vụ mwan3..." >> "$LOG_FILE"
+        /etc/init.d/mwan3 restart >> "$LOG_FILE" 2>&1
+        if [ $? -eq 0 ]; then
+            echo "$(date): [SUCCESS] Khởi động lại mwan3 thành công." >> "$LOG_FILE"
+            logger -t check_wwan "Khởi động lại mwan3 thành công."
+        else
+            echo "$(date): [ERROR] Khởi động lại mwan3 thất bại." >> "$LOG_FILE"
+            logger -t check_wwan "Khởi động lại mwan3 thất bại."
+        fi
+    else
+        echo "$(date): [WARN] Không tìm thấy dịch vụ mwan3." >> "$LOG_FILE"
+        logger -t check_wwan "Không tìm thấy dịch vụ mwan3."
+    fi
+}
