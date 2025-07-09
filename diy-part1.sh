@@ -25,3 +25,9 @@
  #echo 'src-git SMS https://github.com/4IceG/luci-app-sms-tool.git' >>feeds.conf.default
  #echo 'src-git atinout https://github.com/4IceG/luci-app-atinout-mod.git' >>feeds.conf.default
 sed -i '$a src-git modem https://github.com/kiddin9/kwrt-packages.git' feeds.conf.default
+echo >> feeds.conf.default
+echo 'src-git qmodem https://github.com/FUjr/QModem.git;main' >> feeds.conf.default
+./scripts/feeds update qmodem
+./scripts/feeds install -a -p qmodem
+./scripts/feeds update -a && ./scripts/feeds install -a
+./scripts/feeds install -a -f -p qmodem
